@@ -1,0 +1,555 @@
+---
+title: "Stat 479 Project"
+author: "Anze X, Bob D, Jihua L"
+date: "2020/12/14"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup}
+library(qdap)
+library(dplyr)
+library(tm)
+library(ggplot2)
+library(ggthemes)
+library(wordcloud)
+library(plotrix)
+library(dendextend)
+library(RWeka)
+library(quanteda)
+library(stringr)
+library(glmnet)
+library(lubridate)
+library(tidyverse)
+library(caret)
+library(pls)
+library(qdapTools)
+library(nnet)
+library(glmnet)
+library(RColorBrewer)
+library(gplots)
+library(DAAG)
+library(MLmetrics)
+library(magrittr)
+
+# Set the memory limit 
+memory.limit(100000)
+
+```
+
+```{r functions for seperate season and daytime into categories}
+factorizeSeason <- function(date){
+  season <- vector(mode = "character", length = length(date))
+  time <- ymd_hm(date)
+  
+  for (i in 1:length(time)){
+    if ((month(time[i]) <= 2) | (month(time[i]) >= 12)){
+      season[i] <- "Winter" # 12-2
+    }
+    else if ((month(time[i]) <= 5) & (month(time[i]) >= 3)){
+      season[i] <- "Spring" # 3-5
+    }
+    else if ((month(time[i]) <= 8) & (month(time[i]) >= 6)){
+      season[i] <- "Summer" # 6-8
+    }
+    else{
+      season[i] <- "Autumn" # 9-11
+    }
+  }
+  return(season)
+}
+
+factorizeDaytime <- function(date){
+  dayTime <- vector(mode = "character", length = length(date))
+  time <- ymd_hm(date)
+  
+  for (i in 1:length(time)){
+    hour <- hour(time[i])
+    
+    if ((hour >= 22) | (hour <= 4 )){
+      dayTime[i] <- "Night"
+    }
+    else if ((hour >= 4) & (hour <= 10)){
+      dayTime[i] <- "Morning"
+    }
+    else if ((hour >= 10) & (hour <= 16)){
+      dayTime[i] <- "Noon"
+    }
+    else{
+      dayTime[i] <- "Evening"
+    }
+  }
+  return(dayTime)
+}
+```
+
+```{r function for check NA}
+checkNA <- function(df){
+  if (sum(is.na(df$stars)) + sum(is.na(df$text)) + sum(is.na(df$date)) 
+      + sum(is.na(df$city)) + sum(is.na(df$categories)) + sum(is.na(df$nchar)) + sum(is.na(df$nword)) + sum(is.na(df$Id))
+      + sum(is.na(df$sentiment)) != 0){
+    ?stop
+  }
+}
+```
+
+```{r function for corpus processing}
+# basic transformations for texts
+# input: a dataframe with $text
+# output: transformed workable format by tm package
+textTransformation <- function(totalText){
+  ## Make a vector source and a corpus 
+  corpus_review <- Corpus(VectorSource(totalText$text))
+  
+  ## Remove punctuation
+  ## create "addSpace" function that finds a specified pattern and substitute it with a space
+  addSpace <- content_transformer(function(x, pattern){
+    return(gsub(pattern, " ", x))
+  })
+  
+  corpus_review <- tm_map(corpus_review, addSpace, "-")
+  corpus_review <- tm_map(corpus_review, removePunctuation)
+  
+  ## Remove extra whitespaces
+  corpus_review <- tm_map(corpus_review, stripWhitespace)
+  ## Convert to lower case 
+  corpus_review <- tm_map(corpus_review, content_transformer(tolower))
+  ## Remove numbers
+  corpus_review <- tm_map(corpus_review, removeNumbers)
+  ## Remove stopwords 
+  corpus_review <- tm_map(corpus_review, removeWords, stopwords("english"))
+  ## Stemming document 
+  corpus_review <- tm_map(corpus_review, stemDocument)
+  
+  return(corpus_review)
+}
+
+
+## merge the DocumentTermMatrix into yelp (original dataset)
+decomposeMatrix <- function(sparseRemoved, df){
+  new_X <- as.matrix(sparseRemoved)
+  
+  new_df <- cbind(df, new_X)
+  
+  ## remove useless cols
+  textIndex <- which(colnames(df) == "text")
+  new_df <- new_df[, -c(textIndex)]
+  
+  return(new_df)
+  
+  ## decompose the above matrix for yelp and ylep_out
+  # new_X_yelp <- new_X[1:55342, ]
+  # new_X_yelp_out <- new_X[55343:92236, ]
+  # corpus_yelp <- cbind(yelp, new_X_yelp)
+  # corpus_yelp_out <- cbind(yelp_out, new_X_yelp_out)
+  
+  
+  # if (c == 1){
+  #   ## Remove the column of categories, text, id, city, date from yelp
+  #   textIndex <- which(colnames(corpus_yelp) == "text")
+  #   categoriesIndex <- which(colnames(corpus_yelp) == "categories")
+  #   idIndex <- which(colnames(corpus_yelp) == "Id")
+  #   cityIndex <- which(colnames(corpus_yelp) == "city")
+  #   dateIndex <- which(colnames(corpus_yelp) == "date")
+  #   corpus_yelp_2 <- corpus_yelp[, -c(textIndex, categoriesIndex, idIndex, cityIndex, dateIndex)]
+  # 
+  #   return(corpus_yelp_2)
+  # }
+  # else{
+  #   ## Remove the column of categories, text, id, city, date from yelp_out
+  #   textIndex <- which(colnames(corpus_yelp_out) == "text")
+  #   categoriesIndex <- which(colnames(corpus_yelp_out) == "categories")
+  #   idIndex <- which(colnames(corpus_yelp_out) == "Id")
+  #   cityIndex <- which(colnames(corpus_yelp_out) == "city")
+  #   dateIndex <- which(colnames(corpus_yelp_out) == "date")
+  #   corpus_yelp_out_2 <- corpus_yelp_out[, -c(textIndex, categoriesIndex, idIndex, cityIndex, dateIndex)]
+  # 
+  #   return(corpus_yelp_out_2)
+  # }
+}
+
+```
+
+```{r Data reading & preprocessing}
+## read in data
+rawData <- read.csv("raw_data/yelp_data.csv")
+yelp <- subset(rawData, select = c(1:12))
+yelp <- subset(yelp, select = -c(5,6,7))
+
+## randomly choose 5000
+checkNA(yelp)
+random_rowNum <- sample(1:55342, 5000, replace = F)
+yelp <- yelp[c(random_rowNum), ]
+yelp["Id"] <- c(1:5000)
+
+
+## convert text into actual strings
+yelp$text <- as.character(yelp$text)
+yelp$categories <- as.character(yelp$categories)
+
+
+## generate season and daytime categorical variable from variable date
+season <- factorizeSeason(yelp$date)
+yelp <- cbind(yelp, season)
+yelp <- cbind(yelp, mtabulate(strsplit(as.character(yelp$season), ', ')))
+yelp <- yelp[-which(colnames(yelp) == "season")]
+yelp$Spring <- as.factor(yelp$Spring)
+yelp$Summer <- as.factor(yelp$Summer)
+yelp$Autumn <- as.factor(yelp$Autumn)
+yelp$Winter <- as.factor(yelp$Winter)
+
+dayTime <- factorizeDaytime(yelp$date)
+yelp <- cbind(yelp, dayTime)
+yelp <- cbind(yelp, mtabulate(strsplit(as.character(yelp$dayTime), ', ')))
+yelp <- yelp[-which(colnames(yelp) == "dayTime")]
+yelp$Evening <- as.factor(yelp$Evening)
+yelp$Night <- as.factor(yelp$Night)
+yelp$Morning <- as.factor(yelp$Morning)
+yelp$Noon <- as.factor(yelp$Noon)
+
+## factorize categories
+yelp <- cbind(yelp, mtabulate(strsplit(as.character(yelp$categories), ', ')))
+cols <- c(20:50)
+yelp[,cols] <- lapply(yelp[,cols], as.factor)
+
+
+## save preprocessed data and remove unnecessary data to save memory
+rm(list = setdiff(ls(), c("yelp", "rawData")))
+save(list = ls(), file = "./intermidiate_data/preprocessed_data.Rdata")
+```
+
+```{r DATA VISUALIZATION & DATA TRANSFORMATION}
+# DATA VISUALIZATION
+par(mfrow = c(2,2))
+barplot(table(yelp$stars),main="Distribution of stars",xlab="Stars",ylab="Frequency")
+hist(yelp$nchar, breaks=10000,main="Distribution of variable nchar",xlab="Number of Characters",ylab="Frequency")
+hist(yelp$nword, breaks=10000,main="Distribution of variable nword",xlab="Number of Words",ylab="Frequency")
+plot(density(yelp$sentiment), main = "Density of sentiment score", xlab = "Sentiment score", ylab = "Density")
+
+
+# DATA TRANSFORMATION
+yelp$nchar <- log(1+yelp$nchar)
+yelp$nword <- log(1+yelp$nword)
+
+## check distribution of transformed data
+par(mfrow = c(1,2))
+hist(yelp$nchar, breaks=10000,main="Distribution of variable nchar (AF)",xlab="Number of Characters",ylab="Frequency")
+hist(yelp$nword, breaks=10000,main="Distribution of variable nword (AF)",xlab="Number of Words",ylab="Frequency") # AF - after transformation
+
+## remove useless features
+categoriesIndex <- which(colnames(yelp) == "categories")
+idIndex <- which(colnames(yelp) == "Id")
+dateIndex <- which(colnames(yelp) == "date")
+yelp <- yelp[, -c(categoriesIndex, idIndex, dateIndex)]
+
+## remove city to prevent level problem
+yelp <- yelp[, -which(colnames(yelp) == "city")]
+
+## seperate into train&test + validation (20%)
+rand <- sample(1:5000, 5000* 0.2, replace = F)
+yelp_validation <- yelp[rand,]
+yelp <- yelp[-c(rand),]
+
+## save data
+rm(list = setdiff(ls(), c("yelp", "yelp_validation")))
+save(list = ls(), file = "./intermidiate_data/transformed_data.Rdata")
+```
+
+```{r LOAD STOPWORDS & DICTIONARY}
+## load a list of stopWords and do additional removal of stopwords
+stopWords <- scan("./raw_data/stopwords.txt", sep = ",", character())
+stopWords <- trimws(stopWords, which = "both")
+
+## load dictionary
+positiveWords <- scan("./raw_data/positive-words.txt", sep = "",character(), skip = 31)
+negativeWords <- scan("./raw_data/negative-words.txt", sep = "",character(), skip = 31)
+dictionaryWords <- data.frame(text = c(positiveWords, negativeWords))
+
+## Garbage Collection
+rm(list = setdiff(ls(), c("yelp", "yelp_validation", "stopWords", "positiveWords", "negativeWords", "dictionaryWords")))
+save(list = ls(), file = "./intermidiate_data/transformed_data_with_dict.Rdata")
+
+```
+
+```{r CORPUS PROCESSING}
+# load("./intermidiate_data/transformed_data_with_dict.Rdata")
+
+## transform original text
+text <- data.frame("text" = yelp$text)
+corpus_review <- textTransformation(text)
+
+## transform external text
+dictionary_review <- data.frame(text = paste(dictionaryWords$text, collapse = " "))
+dictionary_review <- textTransformation(dictionary_review)
+dictionaryBag <- DocumentTermMatrix(dictionary_review)$dimnames$Terms
+
+## GENERATE A DOCUMENT TERM MATRIX FROM CORPUS_REVIEW OF YELP TEXT 
+## Sparsity: # of 0 entries / # of total entries
+## Non-/sparse entries: # of non-zero / # of 0
+
+## Interpretation:  stemmed words,  documents, % of the words are sparse, longest word: 
+
+## Build DocumentTermMatrix for corpus_review with original words
+dtm_noDict <- DocumentTermMatrix(corpus_review, control = list(weighting = weightTfIdf))
+dtm_noDict_SparseRemoved <- removeSparseTerms(dtm_noDict, 0.999) #  3270 terms
+
+## Build DocumentTermMatrix for corpus_review with dictionary dictionaryBag
+dtm_onlyDict <- DocumentTermMatrix(corpus_review, control = list(weighting = weightTfIdf, dictionary = dictionaryBag))
+dtm_onlyDict_SparseRemoved <- removeSparseTerms(dtm_onlyDict, 0.9999) # 1980 terms
+
+## Build DocumentTermMatrix for corpus_review with both original words and external dictionary
+aggrBag <- c(dictionaryBag, dtm_noDict_SparseRemoved$dimnames$Terms) # 4167 words
+aggrDtm <- DocumentTermMatrix(corpus_review, control = list(weighting = weightTfIdf, dictionary = aggrBag))
+aggrDtm_SparseRemoved <- removeSparseTerms(aggrDtm, 0.992) # 0.9997 - 3843 terms
+
+
+## Build DocumentTermMatrix for validation set using same configuration as above
+## dtm_noDict
+## dtm_noDict_SparseRemoved
+## aggrDtm_SparseRemoved
+validation_text <- data.frame("text" = yelp_validation$text)
+validation_review <- textTransformation(validation_text)
+aggrDtm_SparseRemoved_validation <- DocumentTermMatrix(validation_review, control = list(weighting = weightTfIdf, dictionary = aggrDtm_SparseRemoved$dimnames$Terms))
+
+
+
+# 4 OPTIONS: CHOOSE ONE DICT TO RUN
+option <- 4
+
+if (option == 1){
+  # OPTION 1: Only dictionary 
+  onlyDict_yelp <- decomposeMatrix(dtm_onlyDict, yelp, 1)
+  yelp_validation <- decomposeMatrix(dtm_onlyDict, yelp_validation, 2)
+  save(list = c("onlyDict_yelp", "yelp_validation"), file = "./intermidiate_data/onlyDict.Rdata")
+}else if (option == 2){
+  # OPTION 2: Only dictionary with sparse remove 
+  onlyDict_SparseRemoved_yelp <- decomposeMatrix(dtm_onlyDict_SparseRemoved, yelp, 1)
+  yelp_validation <- decomposeMatrix(dtm_onlyDict_SparseRemoved, yelp_validation, 2)
+  save(list = c("onlyDict_SparseRemoved_yelp", "yelp_validation"), file = "./intermidiate_data/onlyDict_SparseRemoved.Rdata")
+}else if (option == 3){
+  # OPTION 3: Only yelp$text with sparse remove 
+  noDict_SparseRemoved_yelp <- decomposeMatrix(dtm_noDict_SparseRemoved, yelp, 1)
+  yelp_validation <- decomposeMatrix(dtm_noDict_SparseRemoved, yelp_validation, 2)
+  save(list = c("noDict_SparseRemoved_yelp", "yelp_validation"), file = "./intermidiate_data/noDict_SparseRemoved.Rdata")
+}else if (option == 4){
+  # OPTION 4: Raw dictionary + yelp$text with sparse remove 
+  aggr_SparseRemoved_yelp <- decomposeMatrix(aggrDtm_SparseRemoved, yelp)
+  yelp_validation <- decomposeMatrix(aggrDtm_SparseRemoved_validation, yelp_validation)
+  save(list = c("aggr_SparseRemoved_yelp", "yelp_validation"), file = "./intermidiate_data/aggr_SparseRemoved.Rdata")
+}
+
+```
+
+```{r model_1: Linear Regression}
+load("./intermidiate_data/aggr_SparseRemoved.Rdata")
+mlrModel <- lm(stars ~ ., data = aggr_SparseRemoved_yelp)
+
+stars_prediction <- predict(mlrModel, newdata = yelp_validation[, -which(colnames(yelp_validation) == "stars")])
+stars_prediction <- pmax(stars_prediction, 1)
+stars_prediction <- pmin(stars_prediction, 5)
+
+## for plotting
+cv.mlrModel <- cv.lm(aggr_SparseRemoved_yelp, mlrModel, m = 5, seed = 479, plotit = c("Observed","Residual"), printit = F)
+
+set.seed(479)
+train.cl <- trainControl(method = "cv", number = 5 )
+cv.mlrModel <- train(stars~., data = aggr_SparseRemoved_yelp, method = "lm", trControl = train.cl)
+cv.mlrModel$resample
+
+mse_validation = MSE(stars_prediction, as.double(yelp_validation$stars)) # mse by comparing predicted and true in validation set  
+rmse_validation = RMSE(stars_prediction, as.double(yelp_validation$stars))
+Adjusted_R_square = 0.624
+# "mse_cv" = c(0.99, 1.3, 1.29, 1.24, 1.27) # extracted from output directly
+# "SS_cv" = c(796, 1039, 1033, 991, 1017) # extracted from output directly
+# "mse_cv_mean_and_sd" = c(mean(c(0.99, 1.3, 1.29, 1.24, 1.27)), sd(c(0.99, 1.3, 1.29, 1.24, 1.27)))
+
+# check most significant vars
+
+mlrModel$rank
+significant_ones <- summary(mlrModel)$coef[summary(mlrModel)$coef[,4] <= 0.05, 4]
+length(significant_ones)
+significant_ones[order(significant_ones)[1:10]]
+
+```
+
+```{r }
+# Xmat <- data.matrix(aggr_SparseRemoved_yelp[,-which(colnames(yelp_validation) == "stars")])
+# Ymat <- aggr_SparseRemoved_yelp$stars
+# 
+# # Fit lasso model
+# # model_lasso <- glmnet(Xmat, Ymat, standardize = F, alpha=1, lambda = model_lasso_cv$lambda.min)
+# 
+# set.seed(1)
+# model_lasso_cv <- cv.glmnet(Xmat, Ymat, nfold=10, alpha=1)
+# plot(model_lasso_cv, main = "MSE vs. Log(lambda)")
+# 
+# # prediction on train set
+# pred_train_lasso <- predict(model_lasso_cv, 
+#                   newx = Xmat,
+#                   s = model_lasso_cv$lambda.min)
+# 
+# pred_train_lasso <- pmax(pred_train_lasso, 1)
+# pred_train_lasso <- pmin(pred_train_lasso, 5)
+# MSE(Ymat, pred_train_lasso)
+# 
+# 
+# # prediction on validation set
+# pred_validation_lasso <- predict(model_lasso_cv, 
+#                   newx = data.matrix(yelp_validation[,-which(colnames(yelp_validation) == "stars")]),
+#                   s = model_lasso_cv$lambda.min)
+# 
+# pred_validation_lasso <- pmax(pred_validation_lasso, 1)
+# pred_validation_lasso <- pmin(pred_validation_lasso, 5)
+# MSE(yelp_validation$stars, pred_validation_lasso)
+# RMSE(yelp_validation$stars, pred_validation_lasso)
+# 
+# sig_ones <- summary(pred_train_lasso)$coef
+```
+
+
+```{r model_2: Lasso Regression}
+set.seed(479)
+
+x <- model.matrix(stars~., data = aggr_SparseRemoved_yelp)
+y <- as.numeric(aggr_SparseRemoved_yelp$stars)
+
+new_x <- model.matrix(~., data = yelp_validation[, -which(colnames(yelp_validation) == "stars")])
+
+yelp.lasso <- glmnet(x, y, alpha = 1)
+cv.lasso <- cv.glmnet(x, y, alpha = 1, nfold = 5)
+
+review_logreg <- glmnet(x, y, alpha = 1, lambda = cv.lasso$lambda.min)
+
+logregcoef = as.matrix(coef(review_logreg))
+odds_ratio = as.matrix(exp(coef(review_logreg)))
+
+mypalette <- brewer.pal(8, "Set2")
+plot(yelp.lasso, xvar="lambda", lebel=TRUE,lwd=0.01, col=mypalette, main = "Coefficients vs. log(lambda)")
+abline(h=0, lwd=0.01, lty=2, col="grey")
+
+plot(cv.lasso, main = "MSE vs. Log(lambda)")
+
+m <- predict(review_logreg, s = cv.lasso$lambda.min, newx = new_x)
+m <- pmax(m, 1)
+m <- pmin(m, 5)
+
+m_train <- predict(review_logreg, s = cv.lasso$lambda.min, newx = x)
+m_train <- pmax(m_train, 1)
+m_train <- pmin(m_train, 5)
+
+MSE(m_train, aggr_SparseRemoved_yelp$stars)
+MSE(m, yelp_validation$stars)
+RMSE(m, yelp_validation$stars)
+sum(review_logreg$beta != 0)
+cv.lasso$cvm[which(cv.lasso$lambda == cv.lasso$lambda.min)]
+cv.lasso$lambda.min
+```
+
+
+```{r lasso with less sample}
+set.seed(479)
+
+rand <- sample(1:5000, 500)
+
+x <- model.matrix(stars~., data = aggr_SparseRemoved_yelp[-c(rand), ])
+y <- as.numeric(aggr_SparseRemoved_yelp[-c(rand), ]$stars)
+
+new_x <- model.matrix(~., data = yelp_validation[, -which(colnames(yelp_validation) == "stars")])
+
+yelp.lasso <- glmnet(x, y, alpha = 1)
+cv.lasso <- cv.glmnet(x, y, alpha = 1, nfold = 5)
+
+review_logreg <- glmnet(x, y, alpha = 1, lambda = cv.lasso$lambda.min)
+
+logregcoef = as.matrix(coef(review_logreg))
+odds_ratio = as.matrix(exp(coef(review_logreg)))
+
+mypalette <- brewer.pal(8, "Set2")
+plot(yelp.lasso, xvar="lambda", lebel=TRUE,lwd=0.01, col=mypalette, main = "Coefficients vs. log(lambda)")
+abline(h=0, lwd=0.01, lty=2, col="grey")
+
+plot(cv.lasso, main = "MSE vs. Log(lambda)")
+
+m <- predict(review_logreg, s = cv.lasso$lambda.min, newx = new_x)
+m <- pmax(m, 1)
+m <- pmin(m, 5)
+
+m_train <- predict(review_logreg, s = cv.lasso$lambda.min, newx = x)
+m_train <- pmax(m_train, 1)
+m_train <- pmin(m_train, 5)
+
+MSE(m_train, aggr_SparseRemoved_yelp[-c(rand), ]$stars)
+MSE(m, yelp_validation$stars)
+RMSE(m, yelp_validation$stars)
+sum(review_logreg$beta != 0)
+cv.lasso$cvm[which(cv.lasso$lambda == cv.lasso$lambda.min)]
+cv.lasso$lambda.min
+```
+```{r tuned lasso}
+set.seed(479)
+
+x <- model.matrix(stars~., data = aggr_SparseRemoved_yelp)
+y <- as.numeric(aggr_SparseRemoved_yelp$stars)
+
+new_x <- model.matrix(~., data = yelp_validation[, -which(colnames(yelp_validation) == "stars")])
+
+yelp.lasso <- glmnet(x, y, alpha = 1)
+cv.lasso <- cv.glmnet(x, y, alpha = 1, nfold = 5)
+
+review_logreg <- glmnet(x, y, alpha = 1, lambda = cv.lasso$lambda.1se)
+
+logregcoef = as.matrix(coef(review_logreg))
+odds_ratio = as.matrix(exp(coef(review_logreg)))
+
+mypalette <- brewer.pal(8, "Set2")
+plot(yelp.lasso, xvar="lambda", lebel=TRUE,lwd=0.01, col=mypalette, main = "Coefficients vs. log(lambda)")
+abline(h=0, lwd=0.01, lty=2, col="grey")
+
+plot(cv.lasso, main = "MSE vs. Log(lambda)")
+
+m <- predict(review_logreg, s = cv.lasso$lambda.1se, newx = new_x)
+m <- pmax(m, 1)
+m <- pmin(m, 5)
+
+m_train <- predict(review_logreg, s = cv.lasso$lambda.1se, newx = x)
+m_train <- pmax(m_train, 1)
+m_train <- pmin(m_train, 5)
+
+MSE(m_train, aggr_SparseRemoved_yelp$stars)
+MSE(m, yelp_validation$stars)
+RMSE(m, yelp_validation$stars)
+sum(review_logreg$beta != 0)
+cv.lasso$cvm[which(cv.lasso$lambda == cv.lasso$lambda.1se)]
+cv.lasso$lambda.1se
+
+
+```
+
+
+
+```{r function for converting regression to classification}
+classification <- function(pred_mat){
+  pred_mat[(pred_mat < 1.5)] <- 1
+  pred_mat[(pred_mat >= 1.5) & (pred_mat < 2.5)] <- 2
+  pred_mat[(pred_mat >= 2.5) & (pred_mat < 3.5)] <- 3
+  pred_mat[(pred_mat >= 3.5) & (pred_mat < 4.5)] <- 4
+  pred_mat[(pred_mat >= 4.5)] <- 5
+  return(pred_mat)
+}
+
+
+lasso_pred_y = classification(m)
+actual_y = yelp_validation$stars
+
+table(actual_y, lasso_pred_y)
+
+linear_pred_y = classification(stars_prediction)
+table(actual_y, linear_pred_y)
+
+```
+
+
+
+
+
